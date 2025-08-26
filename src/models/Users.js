@@ -15,6 +15,15 @@ const userSchema = new mongoose.Schema({
         type:String,
         required:true
     },
+    resumePreferences:{
+        title:String,
+        location:String,
+        remote:Boolean,
+        skills:[String]
+    },
+    resumePath:{
+        type:String
+    },
     createdAt:{
         type:Date,
         default:Date.now()

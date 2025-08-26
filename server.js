@@ -13,6 +13,9 @@ app.use(cors());
 const authRoute = require('./src/routes/auth');
 app.use('/api/auth', authRoute);
 
+const profileRoutes = require('./src/routes/profile');
+app.use('/api/profile', profileRoutes)
+
 mongoose.connect(process.env.MONGO_URI, {
     useNewUrlParser:true,
     useUnifiedTopology:true,
