@@ -3,158 +3,123 @@ const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
-const nlp = require('compromise'); // lightweight NLP
-const { default: spacyNLP } = require('@nlpjs/lang-en'); // optional spaCy wrapper if using Python via API
 
-const HF_BASE_URL = "https://router.huggingface.co/v1";
+const HF_BASE_URL = 'https://router.huggingface.co/v1';
 const HF_TOKEN = process.env.HF_TOKEN;
 
-// Extract raw text from PDFs
+
+async function extractResumeContent(resumePath) {
+  if (!resumePath || !fs.existsSync(resumePath)) return '';
+  const ext = path.extname(resumePath).toLowerCase();
+  return ext === '.pdf'
+    ? await extractPdfText(resumePath)
+    : ext === '.docx' || ext === '.doc'
+    ? await extractDocxText(resumePath)
+    : '';
+}
+
 async function extractPdfText(resumePath) {
   try {
-    const dataBuffer = fs.readFileSync(resumePath);
-    const data = await pdfParse(dataBuffer);
+    const buffer = fs.readFileSync(resumePath);
+    const data = await pdfParse(buffer);
     return data.text;
-  } catch (err) {
-    console.error('PDF parsing error:', err);
+  } catch (e) {
+    console.error('PDF parsing error:', e);
     return '';
   }
 }
 
-// Extract raw text from DOC/DOCX
 async function extractDocxText(resumePath) {
   try {
     const result = await mammoth.extractRawText({ path: resumePath });
     return result.value;
-  } catch (err) {
-    console.error('DOCX parsing error:', err);
+  } catch (e) {
+    console.error('DOCX parsing error:', e);
     return '';
   }
 }
 
-// Detect file type and extract
-async function extractResumeContent(resumePath) {
-  if (!resumePath || !fs.existsSync(resumePath)) return '';
-  const ext = path.extname(resumePath).toLowerCase();
-  if (ext === '.pdf') {
-    return await extractPdfText(resumePath);
-  } else if (ext === '.doc' || ext === '.docx') {
-    return await extractDocxText(resumePath);
-  }
-  return '';
-}
-
-// Simple NLP parser to extract sections
-function parseResumeSections(text) {
-  if (!text) return {};
-
-  const lower = text.toLowerCase();
-  const sections = {};
-
-  // Split by common headers
-  const parts = lower.split(/\n(?=[A-Z][a-z]+)/g);
-
-  parts.forEach(p => {
-    if (p.includes('experience')) sections.experience = p;
-    else if (p.includes('project')) sections.projects = p;
-    else if (p.includes('education')) sections.education = p;
-    else if (p.includes('skill')) sections.skills = p;
-    else if (p.includes('achievement') || p.includes('award')) sections.achievements = p;
-  });
-
-  // Cleanup
-  Object.keys(sections).forEach(key => {
-    sections[key] = sections[key]
-      .replace(/\n/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  });
-
-  return sections;
-}
-
 exports.generateCoverLetter = async ({ jobDescription, userProfile }) => {
   try {
-    console.log('Generating NLP-enhanced cover letter...');
-
-    const { name, email, jobPreferences = {}, resumePath } = userProfile;
-
+    const { name, email, jobPreferences = {}, resumePath, projects = [], experience = [] } = userProfile;
     let resumeContent = '';
-    if (resumePath) {
-      resumeContent = await extractResumeContent(resumePath);
-    }
+    if (resumePath) resumeContent = await extractResumeContent(resumePath);
 
-    // Parse resume into structured sections
-    const parsedSections = parseResumeSections(resumeContent);
 
-    // Fallbacks
-    const skills = Array.isArray(jobPreferences.skills)
-      ? jobPreferences.skills.join(', ')
-      : jobPreferences.skills || parsedSections.skills || 'Not specified';
+    const formattedProjects = projects.map(proj => 
+      `- ${proj.title}: ${proj.description} ${proj.technologies.length > 0 ? 
+        `(Technologies: ${proj.technologies.join(', ')})` : ''}`
+    ).join('\n');
+
+
+    const formattedExperience = experience.map(exp => 
+      `- ${exp.position} at ${exp.company}: ${exp.description || ''} ${exp.achievements.length > 0 ? 
+        `(Achievements: ${exp.achievements.join(', ')})` : ''}`
+    ).join('\n');
 
     const candidateInfo = `
-Name: ${name || 'Not provided'}
-Email: ${email || 'Not provided'}
-Preferred Job Title: ${jobPreferences.title || 'Not specified'}
-Preferred Location: ${jobPreferences.location || 'Not specified'}
-Open to Remote Work: ${jobPreferences.remote ? 'Yes' : 'No'}
+Name: ${name || 'N/A'}
+Email: ${email || 'N/A'}
+Title: ${jobPreferences.title || 'N/A'}
+Location: ${jobPreferences.location || 'N/A'}
+Remote: ${jobPreferences.remote ? 'Yes' : 'No'}
+Skills: ${Array.isArray(jobPreferences.skills) ? jobPreferences.skills.join(', ') : jobPreferences.skills || 'N/A'}
 
-=== EXTRACTED RESUME DATA ===
-Experience: ${parsedSections.experience || 'Not provided'}
-Projects: ${parsedSections.projects || 'Not provided'}
-Education: ${parsedSections.education || 'Not provided'}
-Skills: ${skills}
-Achievements: ${parsedSections.achievements || 'Not provided'}
+KEY PROJECTS:
+${formattedProjects || 'N/A'}
+
+PROFESSIONAL EXPERIENCE:
+${formattedExperience || 'N/A'}
 `;
 
-    const systemPrompt = `You are a professional cover letter writer who crafts ATS-optimized, personalized cover letters. 
-Use structured sections below and mirror job keywords. 
-Keep tone professional, engaging, and clear (300-400 words).`;
+    const systemPrompt = `You are an expert cover letter writer with 15+ years of experience in HR and recruitment. 
+Create a highly personalized, ATS-optimized cover letter (300-400 words) that:
+1. Starts with a strong, engaging opening that shows genuine interest in the specific company/role
+2. Highlights the most relevant 2-3 projects and experiences that match the job requirements
+3. Uses quantifiable achievements and specific examples
+4. Demonstrates cultural fit and enthusiasm for the company's mission
+5. Ends with a confident call to action
+6. Maintains a professional yet conversational tone
+
+Focus on creating a narrative that connects the candidate's unique background to the specific role.`;
 
     const userPrompt = `
-Job Description:
+JOB OPPORTUNITY:
 ${jobDescription}
 
-Candidate Profile:
+CANDIDATE PROFILE:
 ${candidateInfo}
 
-Write a polished, ATS-friendly cover letter highlighting relevant projects, skills, and experiences. Include greeting and closing.
+Please create a cover letter that specifically references their projects and experience, using concrete examples and metrics where possible. Tailor it to this specific job opportunity.
 `;
 
-    const response = await axios.post(`${HF_BASE_URL}/chat/completions`, {
-      model: "meta-llama/Llama-3.1-8B-Instruct:cerebras",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      max_tokens: 900,
-      temperature: 0.7,
-    }, {
-      headers: {
-        'Authorization': `Bearer ${HF_TOKEN}`,
-        'Content-Type': 'application/json'
+    const response = await axios.post(
+      `${HF_BASE_URL}/chat/completions`,
+      {
+        model: 'meta-llama/Llama-3.1-8B-Instruct:cerebras',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        max_tokens: 1200,
+        temperature: 0.8,
       },
-      timeout: 30000
-    });
+      {
+        headers: {
+          Authorization: `Bearer ${HF_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 30000,
+      }
+    );
 
-    const generatedCoverLetter = response.data.choices[0]?.message?.content;
-    if (!generatedCoverLetter) throw new Error('No cover letter content generated');
-
-    console.log('Cover letter generated successfully.');
-    return generatedCoverLetter;
-
+    const content = response.data.choices?.[0]?.message?.content;
+    if (!content) throw new Error('No cover letter content generated');
+    return content;
   } catch (error) {
-    console.error('Cover letter generation error:', {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data
-    });
-
+    console.error('Cover letter generation error:', error.response?.data || error.message);
     if (error.response?.status === 401) throw new Error('Invalid API token.');
-    if (error.response?.status === 403) throw new Error('Access denied.');
     if (error.response?.status === 429) throw new Error('Rate limit exceeded.');
-    if (error.response?.status === 503) throw new Error('Service temporarily unavailable.');
-
-    throw new Error('Failed to generate cover letter. Please try again.');
+    throw new Error('Failed to generate cover letter.');
   }
 };
