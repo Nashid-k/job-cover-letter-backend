@@ -18,6 +18,9 @@ app.use('/api/auth', authRoute);
 const profileRoutes = require('./src/routes/profile');
 app.use('/api/profile', profileRoutes)
 
+const coverLetterRoutes = require('./src/routes/coverLetter');
+app.use('/api/coverletter', coverLetterRoutes);
+
 mongoose.connect(process.env.MONGO_URI, {
     useNewUrlParser:true,
     useUnifiedTopology:true,

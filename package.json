@@ -10,12 +10,18 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@nlpjs/lang-en": "^5.0.0-alpha.5",
+    "axios": "^1.11.0",
     "bcrypt": "^6.0.0",
+    "compromise": "^14.14.4",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.10.0",
     "mongoose": "^8.18.0",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "openai": "^5.16.0",
+    "pdf-parse": "^1.1.1"
   }
 }
