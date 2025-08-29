@@ -10,8 +10,8 @@ const projectSchema = new mongoose.Schema({
     required: true
   },
   technologies: [String],
-  startDate: Date,
-  endDate: Date,
+  startDate: String, // Changed to String for flexibility
+  endDate: String,   // Changed to String for flexibility
   current: {
     type: Boolean,
     default: false
@@ -30,14 +30,31 @@ const experienceSchema = new mongoose.Schema({
     required: true
   },
   description: String,
-  startDate: Date,
-  endDate: Date,
+  startDate: String, // Changed to String for flexibility
+  endDate: String,   // Changed to String for flexibility
   current: {
     type: Boolean,
     default: false
   },
   achievements: [String],
   skills: [String]
+});
+
+const educationSchema = new mongoose.Schema({
+  institution: String,
+  degree: String,
+  fieldOfStudy: String,
+  startDate: String,
+  endDate: String,
+  current: Boolean,
+  description: String
+});
+
+const certificationSchema = new mongoose.Schema({
+  name: String,
+  issuer: String,
+  date: String,
+  expiryDate: String
 });
 
 const userSchema = new mongoose.Schema({
@@ -48,7 +65,8 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
-    unique: true
+    unique: true,
+    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
   },
   password: {
     type: String,
@@ -68,25 +86,17 @@ const userSchema = new mongoose.Schema({
   },
   projects: [projectSchema],
   experience: [experienceSchema],
-  education: [{
-    institution: String,
-    degree: String,
-    fieldOfStudy: String,
-    startDate: Date,
-    endDate: Date,
-    current: Boolean,
-    description: String
-  }],
-  certifications: [{
-    name: String,
-    issuer: String,
-    date: Date,
-    expiryDate: Date
-  }],
+  education: [educationSchema],
+  certifications: [certificationSchema],
   createdAt: {
     type: Date,
     default: Date.now
   }
 });
+
+// Index for better query performance
+userSchema.index({ email: 1 });
+userSchema.index({ 'jobPreferences.skills': 1 });
+userSchema.index({ 'jobPreferences.location': 1 });
 
 module.exports = mongoose.model('User', userSchema);
