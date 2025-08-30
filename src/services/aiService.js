@@ -4,134 +4,200 @@ const path = require('path');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 
-const HF_BASE_URL = 'https://router.huggingface.co/v1';
+const HF_BASE_URL = process.env.HF_BASE_URL || 'https://router.huggingface.co/v1';
 const HF_TOKEN = process.env.HF_TOKEN;
+const HF_MODEL = process.env.HF_MODEL || 'meta-llama/Llama-3.1-8B-Instruct:cerebras';
+const MAX_TOKENS = parseInt(process.env.HF_MAX_TOKENS) || 1200;
+const TEMPERATURE = parseFloat(process.env.HF_TEMPERATURE) || 0.7;
+const API_TIMEOUT = parseInt(process.env.API_TIMEOUT) || 30000;
 
-// Enhanced universal skills extraction for all job types
-function extractSkillsFromText(text, jobType = 'general') {
-  if (!text) return { skills: [], skillLevels: {} };
-  
-  const skillCategories = {
-    // Technical Skills
-    programming: ['javascript', 'typescript', 'python', 'java', 'c++', 'c#', 'php', 'ruby', 'go', 'rust', 'swift', 'kotlin', 'r', 'matlab', 'scala', 'perl'],
-    frontend: ['react', 'vue', 'angular', 'svelte', 'html', 'css', 'bootstrap', 'tailwind', 'next.js', 'nuxt.js', 'jquery', 'sass', 'less'],
-    backend: ['node.js', 'express', 'django', 'flask', 'spring', 'laravel', 'rails', 'asp.net', 'fastapi', 'nestjs'],
-    databases: ['mongodb', 'postgresql', 'mysql', 'redis', 'elasticsearch', 'sql', 'nosql', 'oracle', 'sqlite', 'cassandra'],
-    cloud: ['aws', 'azure', 'gcp', 'firebase', 'heroku', 'vercel', 'netlify', 'digitalocean', 'cloudflare'],
-    devops: ['docker', 'kubernetes', 'jenkins', 'terraform', 'ansible', 'ci/cd', 'linux', 'unix', 'bash', 'shell'],
-    tools: ['git', 'github', 'gitlab', 'postman', 'figma', 'sketch', 'adobe xd', 'photoshop', 'illustrator', 'jira', 'confluence'],
-    
-    // Business & Management
-    management: ['project management', 'team leadership', 'strategic planning', 'budget management', 'stakeholder management', 'risk management', 'change management', 'people management'],
-    business: ['business analysis', 'market research', 'financial analysis', 'data analysis', 'reporting', 'forecasting', 'budgeting', 'cost management'],
-    communication: ['presentation', 'public speaking', 'technical writing', 'documentation', 'training', 'mentoring', 'customer service', 'client relations'],
-    
-    // Analytics & Data
-    analytics: ['data analysis', 'statistical analysis', 'machine learning', 'data visualization', 'tableau', 'power bi', 'excel', 'google analytics', 'sql', 'python', 'r'],
-    
-    // Design & Creative
-    design: ['ui/ux design', 'graphic design', 'web design', 'user experience', 'user interface', 'wireframing', 'prototyping', 'adobe creative suite'],
-    
-    // Sales & Marketing
-    marketing: ['digital marketing', 'content marketing', 'social media marketing', 'seo', 'sem', 'email marketing', 'marketing automation', 'brand management'],
-    sales: ['sales', 'lead generation', 'customer acquisition', 'account management', 'crm', 'salesforce', 'hubspot', 'negotiation'],
-    
-    // Industry-specific
-    finance: ['financial modeling', 'accounting', 'auditing', 'tax preparation', 'investment analysis', 'risk assessment', 'compliance'],
-    healthcare: ['patient care', 'medical terminology', 'hipaa', 'electronic health records', 'clinical research', 'healthcare administration'],
-    education: ['curriculum development', 'lesson planning', 'classroom management', 'educational technology', 'assessment', 'student engagement'],
-    
-    // Methodologies & Frameworks
-    methodologies: ['agile', 'scrum', 'kanban', 'waterfall', 'lean', 'six sigma', 'tdd', 'bdd', 'devops', 'itil']
-  };
-
-  const allSkills = Object.values(skillCategories).flat();
-  const foundSkills = new Set();
-  const skillLevels = {};
-  const textLower = text.toLowerCase();
-  
-  // Experience level indicators
-  const levelIndicators = {
-    expert: ['expert', 'senior', 'lead', 'principal', 'architect', 'advanced', '5+ years', '7+ years', '10+ years', 'extensive experience'],
-    proficient: ['proficient', 'experienced', 'skilled', '3+ years', '4+ years', '2-4 years', 'strong experience'],
-    intermediate: ['intermediate', 'familiar', '1-2 years', '2+ years', 'working knowledge'],
-    beginner: ['beginner', 'basic', 'learning', 'recent', 'new to', 'introduction']
-  };
-
-  // Enhanced skill detection with flexible matching
-  allSkills.forEach(skill => {
-    const skillVariations = generateSkillVariations(skill);
-    let skillFound = false;
-    
-    skillVariations.forEach(variation => {
-      if (!skillFound && textLower.includes(variation.toLowerCase())) {
-        foundSkills.add(skill);
-        skillFound = true;
-        
-        // Determine skill level based on context
-        let detectedLevel = 'intermediate'; // default
-        for (const [level, indicators] of Object.entries(levelIndicators)) {
-          if (indicators.some(indicator => {
-            const contextRegex = new RegExp(`${indicator}.*${variation}|${variation}.*${indicator}`, 'i');
-            return contextRegex.test(textLower);
-          })) {
-            detectedLevel = level;
-            break;
-          }
-        }
-        skillLevels[skill] = detectedLevel;
+async function callHF(messages, max_tokens = MAX_TOKENS, temperature = TEMPERATURE) {
+  try {
+    const response = await axios.post(
+      `${HF_BASE_URL}/chat/completions`,
+      {
+        model: HF_MODEL,
+        messages,
+        max_tokens,
+        temperature,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${HF_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: API_TIMEOUT,
       }
+    );
+    return response.data.choices?.[0]?.message?.content;
+  } catch (error) {
+    console.error('HF API error:', {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
     });
+    throw new Error(`AI service error: ${error.response?.data?.error || error.message}`);
+  }
+}
+
+async function extractSkillsAI(text, isJob = false, userSchemaSkills = []) {
+  const systemPrompt = 'Extract skills, qualifications, expertise, and soft skills comprehensively from the provided text. Ensure skills are specific and relevant to the context (job description or user profile). Output JSON: {"skills": ["skill1", "skill2", ...]}';
+  const userPrompt = isJob
+    ? `From this job description, extract all required skills, including technical, soft, and industry-specific skills:\n\n${text}`
+    : `From this user profile, extract skills present in the provided schema (jobPreferences.skills, projects.technologies, experience.skills) or resume. Cross-check against: ${userSchemaSkills.join(', ') || 'None'}. Only include verified skills present in the schema or resume:\n\n${text}`;
+
+  try {
+    const content = await callHF([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], Math.floor(MAX_TOKENS / 2), TEMPERATURE / 2);
+
+    const extractedSkills = JSON.parse(content).skills || [];
+    return isJob ? extractedSkills : extractedSkills.filter(skill => 
+      userSchemaSkills.some(schemaSkill => 
+        schemaSkill.toLowerCase().includes(skill.toLowerCase()) || 
+        skill.toLowerCase().includes(schemaSkill.toLowerCase())
+      )
+    );
+  } catch (error) {
+    console.error('Skill extraction failed:', error.message);
+    return [];
+  }
+}
+
+async function analyzeSchemaAlignmentAI(userProfileText, jobDescription, userProfile) {
+  const systemPrompt = 'Analyze how each user schema detail (profession, jobPreferences, projects, experience, education, certifications) contributes to the job description, including transferable benefits. Skip missing or undefined fields. Output JSON: {"alignmentDetails": [{"schemaField": "fieldName", "detail": "value", "usefulness": "explanation"}]}';
+  const userPrompt = `
+User Profile: ${userProfileText}
+
+Job Description: ${jobDescription}
+
+Profession: ${userProfile.profession || 'Professional'}
+Preferred Industries: ${(userProfile.jobPreferences?.preferredIndustries || []).join(', ') || 'None'}
+
+For each available schema field (e.g., profession, each project, experience, education, certification), explain how it benefits the job, even indirectly (e.g., teamwork from a project applies to collaboration in the JD). Skip missing or undefined fields. Be comprehensive, truthful, and creative in identifying transferable value.
+`;
+
+  try {
+    const content = await callHF([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], MAX_TOKENS, TEMPERATURE);
+
+    return JSON.parse(content).alignmentDetails || [];
+  } catch (error) {
+    console.error('Schema alignment analysis failed:', error.message);
+    return [];
+  }
+}
+
+async function analyzeMatchAI(requiredSkills, userSkills, jobDescription, userProfileText, userExperience, userProfile) {
+  const systemPrompt = 'Analyze job match based on skills, experience, and field alignment. Output JSON.';
+  const userPrompt = `
+Job Description: ${jobDescription}
+
+Required Skills: ${(requiredSkills || []).join(', ') || 'None'}
+
+User Skills: ${(userSkills || []).join(', ') || 'None'}
+
+User Profile: ${userProfileText}
+
+User Experience: ${userExperience.totalYears || 0} years, ${userExperience.positions || 0} positions
+
+Profession: ${userProfile.profession || 'Professional'}
+Preferred Industries: ${(userProfile.jobPreferences?.preferredIndustries || []).join(', ') || 'None'}
+Education: ${(userProfile.education || []).map(e => `${e.degree || 'None'} in ${e.fieldOfStudy || 'None'} from ${e.institution || 'None'}`).join('; ') || 'None'}
+
+Analyze alignment:
+- Compute match score (0-100) based on skill overlap, experience relevance, and field alignment.
+- List matched and missing skills.
+- Provide recommendation: strong_match, good_match, partial_match, consider_with_caution, poor_match.
+- Truthfulness score (0-100): feasibility of honest cover letter without exaggeration.
+- Assume field compatibility by finding transferable skills or experiences, even for seemingly unrelated fields (e.g., engineering skills for a business role via problem-solving).
+
+Output JSON: {
+  "score": number,
+  "matchedSkills": array,
+  "missingSkills": array,
+  "fieldCompatible": boolean,
+  "reason": string,
+  "recommendation": string,
+  "truthfulnessScore": number
+}
+`;
+
+  try {
+    const content = await callHF([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ], MAX_TOKENS, TEMPERATURE);
+
+    const result = JSON.parse(content);
+    return {
+      score: result.score || 0,
+      matchedSkills: result.matchedSkills || [],
+      missingSkills: result.missingSkills || requiredSkills || [],
+      fieldCompatible: result.fieldCompatible !== false,
+      reason: result.reason || 'Transferable skills assumed',
+      recommendation: result.recommendation || 'consider_with_caution',
+      truthfulnessScore: result.truthfulnessScore || 50
+    };
+  } catch (error) {
+    console.error('Job match analysis failed:', error.message);
+    return {
+      score: 0,
+      matchedSkills: [],
+      missingSkills: requiredSkills || [],
+      fieldCompatible: true,
+      reason: 'Analysis failed, transferable skills assumed',
+      recommendation: 'consider_with_caution',
+      truthfulnessScore: 50
+    };
+  }
+}
+
+function normalizeSkillsArray(skills) {
+  if (!skills) return [];
+  if (Array.isArray(skills)) return skills.filter(s => s && typeof s === 'string').map(s => s.trim());
+  if (typeof skills === 'string') return skills.split(/[,;|]/).map(s => s.trim()).filter(s => s);
+  return [];
+}
+
+function calculateUserExperience(userProfile) {
+  const experience = Array.isArray(userProfile.experience) ? userProfile.experience : [];
+  let totalMonths = 0;
+  let validExperiences = 0;
+
+  experience.forEach(exp => {
+    if (exp?.startDate) {
+      try {
+        const start = new Date(exp.startDate);
+        const end = exp.current || !exp.endDate || exp.endDate.toLowerCase() === 'present' ? new Date() : new Date(exp.endDate);
+        if (!isNaN(start) && !isNaN(end) && end >= start) {
+          const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+          totalMonths += Math.max(0, months);
+          validExperiences++;
+        }
+      } catch (dateError) {
+        console.warn('Invalid date in experience:', {
+          position: exp.position || 'Unknown',
+          startDate: exp.startDate,
+          endDate: exp.endDate,
+          error: dateError.message
+        });
+      }
+    }
   });
-  
-  return { 
-    skills: Array.from(foundSkills), 
-    skillLevels,
-    categories: skillCategories
+
+  return {
+    totalYears: Math.floor(totalMonths / 12),
+    totalMonths,
+    positions: validExperiences,
+    hasDetailedExperience: validExperiences > 0
   };
 }
 
-// Generate skill variations for better matching
-function generateSkillVariations(skill) {
-  const variations = [skill];
-  
-  // Common variations
-  const skillLower = skill.toLowerCase();
-  variations.push(skillLower);
-  
-  // Remove dots and add variations
-  if (skill.includes('.')) {
-    variations.push(skill.replace(/\./g, ''));
-    variations.push(skill.replace(/\./g, ' '));
-  }
-  
-  // Handle common abbreviations
-  const abbreviations = {
-    'javascript': ['js'],
-    'typescript': ['ts'],
-    'node.js': ['node', 'nodejs'],
-    'react': ['reactjs'],
-    'vue': ['vuejs'],
-    'angular': ['angularjs'],
-    'postgresql': ['postgres'],
-    'mongodb': ['mongo'],
-    'artificial intelligence': ['ai'],
-    'machine learning': ['ml'],
-    'user experience': ['ux'],
-    'user interface': ['ui'],
-    'search engine optimization': ['seo'],
-    'customer relationship management': ['crm']
-  };
-  
-  if (abbreviations[skillLower]) {
-    variations.push(...abbreviations[skillLower]);
-  }
-  
-  return variations;
-}
-
-// Enhanced job analysis with better skill matching
-function analyzeJobMatch(jobDescription, userProfile) {
+async function analyzeJobMatch(jobDescription, userProfile) {
   if (!jobDescription || !userProfile) {
     return {
       score: 0,
@@ -139,327 +205,148 @@ function analyzeJobMatch(jobDescription, userProfile) {
       missingSkills: [],
       requiredSkills: [],
       recommendation: 'insufficient_data',
-      userExperience: { totalYears: 0, totalMonths: 0, positions: 0, hasDetailedExperience: false }
+      fieldCompatible: true,
+      reason: 'Missing job description or user profile, transferable skills assumed',
+      truthfulnessScore: 50,
+      allUserSkills: [],
+      userExperience: { totalYears: 0, totalMonths: 0, positions: 0, hasDetailedExperience: false },
+      alignmentDetails: []
     };
   }
 
-  const jobText = jobDescription.toLowerCase();
-  
-  // Extract ALL user skills from different sources with normalization
-  const userSkillsFromPreferences = normalizeSkillsArray(userProfile.jobPreferences?.skills);
-  const userSkillsFromProjects = (userProfile.projects || []).flatMap(proj => 
-    normalizeSkillsArray(proj.technologies)
-  );
-  const userSkillsFromExperience = (userProfile.experience || []).flatMap(exp => 
-    normalizeSkillsArray(exp.skills)
-  );
-  
-  // Combine and deduplicate all user skills
-  const allUserSkills = [
-    ...userSkillsFromPreferences,
-    ...userSkillsFromProjects,
-    ...userSkillsFromExperience
-  ].filter((skill, index, array) => 
-    skill && skill.trim() && array.findIndex(s => s.toLowerCase() === skill.toLowerCase()) === index
-  );
+  try {
+    const userExperience = calculateUserExperience(userProfile);
+    const resumeContent = await extractResumeContent(userProfile.resumePath || '');
 
-  const userSkillsLower = allUserSkills.map(skill => skill.toLowerCase().trim());
-  
-  // Extract skills from job description
-  const jobSkillsAnalysis = extractSkillsFromText(jobText);
-  const requiredSkills = jobSkillsAnalysis.skills;
-  
-  // Enhanced skill matching with fuzzy logic
-  const matchedSkills = [];
-  const skillMatchScores = {};
-  
-  requiredSkills.forEach(reqSkill => {
-    const reqSkillLower = reqSkill.toLowerCase();
-    let bestMatchScore = 0;
-    let matchedUserSkill = null;
-    
-    userSkillsLower.forEach(userSkill => {
-      const matchScore = calculateSkillMatchScore(reqSkillLower, userSkill);
-      if (matchScore > bestMatchScore && matchScore >= 0.7) { // 70% similarity threshold
-        bestMatchScore = matchScore;
-        matchedUserSkill = allUserSkills[userSkillsLower.indexOf(userSkill)];
-      }
-    });
-    
-    if (matchedUserSkill) {
-      matchedSkills.push(reqSkill);
-      skillMatchScores[reqSkill] = bestMatchScore;
-    }
-  });
-  
-  const missingSkills = requiredSkills.filter(skill => !matchedSkills.includes(skill));
-  
-  // Calculate experience
-  const userExperience = calculateUserExperience(userProfile);
-  
-  // Enhanced scoring
-  const baseScore = requiredSkills.length > 0 ? (matchedSkills.length / requiredSkills.length) * 100 : 100;
-  const experienceBonus = Math.min(20, userExperience.totalYears * 2); // Up to 20% bonus
-  const finalScore = Math.min(100, Math.round(baseScore + experienceBonus));
-  
-  const recommendation = generateRecommendation(finalScore, matchedSkills, requiredSkills, userExperience);
-  
-  return {
-    score: finalScore,
-    matchedSkills,
-    missingSkills,
-    requiredSkills,
-    allUserSkills, // Include all user skills for cover letter generation
-    skillMatchScores,
-    userExperience,
-    recommendation,
-    truthfulnessScore: Math.min(100, finalScore + 10) // More lenient truthfulness score
-  };
-}
+    const schemaSkills = [
+      ...normalizeSkillsArray(userProfile.jobPreferences?.skills),
+      ...(userProfile.projects || []).flatMap(p => normalizeSkillsArray(p.technologies)),
+      ...(userProfile.experience || []).flatMap(e => normalizeSkillsArray(e.skills))
+    ].filter((s, i, arr) => s && arr.indexOf(s) === i);
 
-// Normalize skills array from various input formats
-function normalizeSkillsArray(skills) {
-  if (!skills) return [];
-  
-  if (Array.isArray(skills)) {
-    return skills.filter(skill => skill && typeof skill === 'string');
-  }
-  
-  if (typeof skills === 'string') {
-    return skills.split(/[,;|]/).map(s => s.trim()).filter(s => s);
-  }
-  
-  return [];
-}
+    const { name, email, profession, jobPreferences = {}, projects = [], experience = [], education = [], certifications = [] } = userProfile;
+    const formattedProjects = projects.map(p => `- ${p.title || 'Project'}: ${p.description || ''} (Technologies: ${normalizeSkillsArray(p.technologies).join(', ') || 'None'})`).join('\n');
+    const formattedExperience = experience.map(e => `- ${e.position || 'Role'} at ${e.company || 'Company'}: ${e.description || (e.achievements || []).join('; ') || ''} (Skills: ${normalizeSkillsArray(e.skills).join(', ') || 'None'})`).join('\n');
+    const formattedEducation = education.map(e => `- ${e.degree || 'None'} in ${e.fieldOfStudy || 'None'} from ${e.institution || 'None'}`).join('\n');
+    const formattedCertifications = certifications.map(c => `- ${c.name || 'None'} from ${c.issuer || 'None'} (${c.date || 'None'})`).join('\n');
 
-// Calculate skill match score using fuzzy string matching
-function calculateSkillMatchScore(skill1, skill2) {
-  if (skill1 === skill2) return 1.0;
-  
-  // Check if one contains the other
-  if (skill1.includes(skill2) || skill2.includes(skill1)) {
-    return Math.max(skill2.length / skill1.length, skill1.length / skill2.length);
-  }
-  
-  // Simple Levenshtein distance for similar strings
-  const distance = levenshteinDistance(skill1, skill2);
-  const maxLength = Math.max(skill1.length, skill2.length);
-  return Math.max(0, 1 - distance / maxLength);
-}
+    const userProfileText = `
+Name: ${name || 'Candidate'}
+Email: ${email || 'Not provided'}
+Profession: ${profession || 'Professional'}
+Job Preferences: 
+  Title: ${jobPreferences.title || 'Not specified'}
+  Location: ${jobPreferences.location || 'Not specified'}
+  Remote: ${jobPreferences.remote ? 'Yes' : 'No'}
+  Skills: ${normalizeSkillsArray(jobPreferences.skills).join(', ') || 'None'}
+  Preferred Industries: ${(jobPreferences.preferredIndustries || []).join(', ') || 'None'}
+Education:
+${formattedEducation || 'None provided'}
+Certifications:
+${formattedCertifications || 'None provided'}
+Projects:
+${formattedProjects || 'None provided'}
+Experience:
+${formattedExperience || 'None provided'}
+Resume:
+${resumeContent || 'None provided'}
+`;
 
-function levenshteinDistance(str1, str2) {
-  const matrix = [];
-  
-  for (let i = 0; i <= str2.length; i++) {
-    matrix[i] = [i];
-  }
-  
-  for (let j = 0; j <= str1.length; j++) {
-    matrix[0][j] = j;
-  }
-  
-  for (let i = 1; i <= str2.length; i++) {
-    for (let j = 1; j <= str1.length; j++) {
-      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1,
-          matrix[i][j - 1] + 1,
-          matrix[i - 1][j] + 1
-        );
-      }
-    }
-  }
-  
-  return matrix[str2.length][str1.length];
-}
+    const requiredSkills = await extractSkillsAI(jobDescription, true);
+    const userSkills = await extractSkillsAI(userProfileText, false, schemaSkills);
+    const alignmentDetails = await analyzeSchemaAlignmentAI(userProfileText, jobDescription, userProfile);
+    const aiAnalysis = await analyzeMatchAI(requiredSkills, userSkills, jobDescription, userProfileText, userExperience, userProfile);
 
-function calculateUserExperience(userProfile) {
-  const experience = userProfile && Array.isArray(userProfile.experience) ? userProfile.experience : [];
-  let totalMonths = 0;
-  let validExperiences = 0;
-  
-  experience.forEach(exp => {
-    if (exp && exp.startDate) {
-      try {
-        const start = new Date(exp.startDate);
-        const end = exp.current || exp.endDate === 'Present' || exp.endDate === 'present' || !exp.endDate ? 
-                   new Date() : new Date(exp.endDate);
-        
-        if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end >= start) {
-          const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
-          totalMonths += Math.max(0, months);
-          validExperiences++;
-        }
-      } catch (dateError) {
-        console.warn('Invalid date format in experience:', exp);
-      }
-    }
-  });
-  
-  return {
-    totalYears: Math.floor(totalMonths / 12),
-    totalMonths: totalMonths,
-    positions: validExperiences,
-    hasDetailedExperience: validExperiences > 0
-  };
-}
-
-function generateRecommendation(score, matchedSkills, requiredSkills, userExperience) {
-  const matchRatio = requiredSkills.length > 0 ? matchedSkills.length / requiredSkills.length : 1;
-  
-  if (score >= 80 && matchRatio >= 0.8) {
-    return 'strong_match';
-  } else if (score >= 60 && matchRatio >= 0.6) {
-    return 'good_match';
-  } else if (score >= 40 && matchRatio >= 0.4) {
-    return 'partial_match';
-  } else if (score >= 25) {
-    return 'consider_with_caution';
-  } else {
-    return 'poor_match';
+    return {
+      ...aiAnalysis,
+      requiredSkills,
+      allUserSkills: userSkills,
+      userExperience,
+      alignmentDetails
+    };
+  } catch (error) {
+    console.error('Job match analysis error:', error.message);
+    return {
+      score: 0,
+      matchedSkills: [],
+      missingSkills: [],
+      requiredSkills: [],
+      recommendation: 'error',
+      fieldCompatible: true,
+      reason: 'Analysis failed due to error',
+      truthfulnessScore: 50,
+      allUserSkills: [],
+      userExperience: { totalYears: 0, totalMonths: 0, positions: 0, hasDetailedExperience: false },
+      alignmentDetails: []
+    };
   }
 }
 
-// Enhanced cover letter generation with better skill utilization
 exports.generateCoverLetter = async ({ jobDescription, userProfile, analysis = null }) => {
   try {
-    // Perform comprehensive analysis
-    const skillsAnalysis = analysis || analyzeJobMatch(jobDescription, userProfile);
-    
-    // Ensure userExperience has required properties
-    if (!skillsAnalysis.userExperience || skillsAnalysis.userExperience.totalYears === undefined) {
-      skillsAnalysis.userExperience = {
-        totalYears: 0,
-        totalMonths: 0,
-        positions: 0,
-        hasDetailedExperience: false
-      };
-    }
-    
-    // Only reject if extremely poor match (< 15% and no relevant skills)
-    if (skillsAnalysis.score < 15 && skillsAnalysis.matchedSkills.length === 0) {
-      return {
-        coverLetter: null,
-        analysis: skillsAnalysis,
-        recommendation: {
-          action: 'not_recommended',
-          reason: 'No relevant skills found for this position. Consider building relevant experience first.',
-          suggestions: [
-            `Learn these key skills: ${skillsAnalysis.requiredSkills.slice(0, 5).join(', ')}`,
-            'Build projects demonstrating these technologies',
-            'Consider entry-level positions in this field'
-          ]
-        }
-      };
-    }
+    const skillsAnalysis = analysis || await analyzeJobMatch(jobDescription, userProfile);
 
-    const { name, email, jobPreferences = {}, resumePath, projects = [], experience = [] } = userProfile;
-    
-    // Use ALL user skills, not just matched ones, but prioritize matched skills
-    const allUserSkills = skillsAnalysis.allUserSkills || [];
-    const matchedSkills = skillsAnalysis.matchedSkills || [];
-    const primarySkills = [...matchedSkills];
-    
-    // Add other user skills that might be relevant but weren't directly matched
-    const additionalRelevantSkills = allUserSkills.filter(skill => 
-      !primarySkills.some(ps => ps.toLowerCase() === skill.toLowerCase()) &&
-      isSkillRelevantToJob(skill, jobDescription)
-    ).slice(0, 5); // Limit additional skills
-    
-    const allRelevantSkills = [...primarySkills, ...additionalRelevantSkills];
-    
-    // Format projects with all their technologies, not just matched ones
-    const formattedProjects = projects.map(proj => {
-      const projTechs = normalizeSkillsArray(proj.technologies);
-      return `- ${proj.title}: ${proj.description || 'Personal/Academic project'} (Technologies: ${projTechs.join(', ') || 'Various technologies'})`;
-    }).join('\n');
+    skillsAnalysis.allUserSkills = skillsAnalysis.allUserSkills || [];
+    skillsAnalysis.matchedSkills = skillsAnalysis.matchedSkills || [];
+    skillsAnalysis.missingSkills = skillsAnalysis.missingSkills || [];
+    skillsAnalysis.requiredSkills = skillsAnalysis.requiredSkills || [];
+    skillsAnalysis.alignmentDetails = skillsAnalysis.alignmentDetails || [];
+    skillsAnalysis.userExperience = skillsAnalysis.userExperience || { totalYears: 0, totalMonths: 0, positions: 0, hasDetailedExperience: false };
 
-    // Format experience with all skills mentioned
-    const formattedExperience = experience.map(exp => {
-      const expSkills = normalizeSkillsArray(exp.skills);
-      return `- ${exp.position || 'Professional Role'} at ${exp.company || 'Previous Company'}: ${exp.description || exp.achievements?.join('; ') || 'Professional experience'} ${expSkills.length ? `(Skills used: ${expSkills.join(', ')})` : ''}`;
-    }).join('\n');
+    const resumeContent = await extractResumeContent(userProfile.resumePath || '');
+    const { name, email, profession, jobPreferences = {}, projects = [], experience = [], education = [], certifications = [] } = userProfile;
+
+    const formattedProjects = projects.map(p => `- ${p.title || 'Project'}: ${p.description || ''} (Technologies: ${normalizeSkillsArray(p.technologies).join(', ') || 'None'})`).join('\n');
+    const formattedExperience = experience.map(e => `- ${e.position || 'Role'} at ${e.company || 'Company'}: ${e.description || (e.achievements || []).join('; ') || ''} (Skills: ${normalizeSkillsArray(e.skills).join(', ') || 'None'})`).join('\n');
+    const formattedEducation = education.map(e => `- ${e.degree || 'None'} in ${e.fieldOfStudy || 'None'} from ${e.institution || 'None'}`).join('\n');
+    const formattedCertifications = certifications.map(c => `- ${c.name || 'None'} from ${c.issuer || 'None'} (${c.date || 'None'})`).join('\n');
 
     const candidateInfo = `
 Name: ${name || 'Candidate'}
-Email: ${email || ''}
-Title: ${jobPreferences.title || 'Professional'}
-Location: ${jobPreferences.location || ''}
-Remote: ${jobPreferences.remote ? 'Yes' : 'No'}
-
-ALL CANDIDATE SKILLS: ${allUserSkills.join(', ') || 'Skills from experience and projects'}
-DIRECTLY MATCHED SKILLS: ${matchedSkills.join(', ') || 'Will highlight transferable skills'}
-ADDITIONAL RELEVANT SKILLS: ${additionalRelevantSkills.join(', ') || 'None'}
-
-Total Experience: ${skillsAnalysis.userExperience.totalYears} years (${skillsAnalysis.userExperience.positions} positions)
-
-PROJECTS:
-${formattedProjects || 'Various personal and academic projects demonstrating technical abilities'}
-
-PROFESSIONAL EXPERIENCE:
-${formattedExperience || 'Professional experience in related fields'}
+Email: ${email || 'Not provided'}
+Profession: ${profession || 'Professional'}
+Job Preferences: ${jobPreferences.title || 'Not specified'}, ${jobPreferences.location || 'Not specified'}, Remote: ${jobPreferences.remote ? 'Yes' : 'No'}
+Preferred Industries: ${(jobPreferences.preferredIndustries || []).join(', ') || 'None'}
+Skills (Preferences): ${normalizeSkillsArray(jobPreferences.skills).join(', ') || 'None'}
+Verified Skills: ${skillsAnalysis.allUserSkills.join(', ') || 'None'}
+Matched Skills: ${skillsAnalysis.matchedSkills.join(', ') || 'None'}
+Missing Skills: ${skillsAnalysis.missingSkills.join(', ') || 'None'}
+Education: ${formattedEducation || 'None'}
+Certifications: ${formattedCertifications || 'None'}
+Projects: ${formattedProjects || 'None'}
+Experience: ${formattedExperience || 'None'}
+Resume: ${resumeContent || 'None'}
+Total Experience: ${skillsAnalysis.userExperience.totalYears || 0} years
 `;
 
-    // More flexible system prompt
-    const systemPrompt = `You are an expert cover letter writer who creates compelling, truthful applications for diverse job seekers across all industries and experience levels.
-
-GUIDELINES:
-1. Use the candidate's actual skills and experiences as listed
-2. For directly matched skills, highlight them prominently
-3. For related/transferable skills, explain how they apply to the role
-4. If the candidate is entry-level or switching fields, focus on potential, learning ability, and transferable skills
-5. Be authentic but confident - every candidate has value to offer
-6. Adapt tone and content based on the job type (technical, business, creative, etc.)
-
-APPROACH:
-- Lead with enthusiasm and genuine interest in the role
-- Highlight the strongest skill matches first
-- Use specific examples from projects and experience
-- Address any gaps by emphasizing learning ability and related experience
-- Close with confidence and next steps
-
-Create a professional 300-400 word cover letter that positions this candidate positively while being truthful about their background.`;
+    const systemPrompt = `You are an expert cover letter writer. Create an outstanding, professional, and broadly appealing cover letter (300-400 words) that uses verified skills and experiences from the user profile. Highlight matched skills, creatively explain how each schema detail (e.g., projects, experience) benefits the job, and adapt tone to the job's field and candidate's experience level. Avoid niche jargon, unverified skills, and focus on enthusiasm, authenticity, and transferable value. Handle missing fields gracefully by focusing on available data.`;
 
     const userPrompt = `
-JOB DESCRIPTION:
+Job Description:
 ${jobDescription}
 
-CANDIDATE PROFILE:
+Candidate Profile:
 ${candidateInfo}
 
-ANALYSIS SUMMARY:
-- Overall Match Score: ${skillsAnalysis.score}%
-- Direct skill matches: ${matchedSkills.length} out of ${skillsAnalysis.requiredSkills.length} required
+Analysis:
+- Match Score: ${skillsAnalysis.score}%
+- Matched Skills: ${skillsAnalysis.matchedSkills.length} of ${skillsAnalysis.requiredSkills.length}
+- Missing Skills: ${skillsAnalysis.missingSkills.join(', ') || 'None'}
 - Recommendation: ${skillsAnalysis.recommendation}
-- Experience Level: ${skillsAnalysis.userExperience.totalYears} years professional experience
+- Field Compatible: ${skillsAnalysis.fieldCompatible}
+- Truthfulness Score: ${skillsAnalysis.truthfulnessScore}%
+- Alignment Details: ${JSON.stringify(skillsAnalysis.alignmentDetails)}
 
-Write a cover letter that makes the best case for this candidate while being honest about their background. Focus on their strengths and show how their skills and experience make them a valuable addition to the team.`;
+Generate an outstanding cover letter that blends the candidate's verified skills, experience, education, and certifications with the job requirements. Use alignment details to highlight how each schema element contributes (e.g., a project's teamwork for collaboration). Address missing skills by emphasizing related experience or learning potential (e.g., REST API experience for GraphQL). Ensure enthusiasm and broad appeal.
+`;
 
-    const response = await axios.post(
-      `${HF_BASE_URL}/chat/completions`,
-      {
-        model: 'meta-llama/Llama-3.1-8B-Instruct:cerebras',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        max_tokens: 1200,
-        temperature: 0.7,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${HF_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 30000,
-      }
-    );
+    const content = await callHF([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ]);
 
-    const content = response.data.choices?.[0]?.message?.content;
     if (!content) throw new Error('No cover letter content generated');
-    
+
     return {
       coverLetter: content,
       analysis: skillsAnalysis,
@@ -467,49 +354,24 @@ Write a cover letter that makes the best case for this candidate while being hon
         action: 'proceed',
         truthfulnessScore: skillsAnalysis.truthfulnessScore,
         matchQuality: skillsAnalysis.recommendation,
-        skillsHighlighted: allRelevantSkills
+        skillsHighlighted: skillsAnalysis.matchedSkills
       }
     };
   } catch (error) {
-    console.error('Cover letter generation error:', error);
-    throw new Error('Failed to generate cover letter. Please try again.');
+    console.error('Cover letter generation error:', {
+      message: error.message,
+      stack: error.stack
+    });
+    throw new Error(`Cover letter generation failed: ${error.message}`);
   }
 };
 
-// Helper function to check if a skill is relevant to the job
-function isSkillRelevantToJob(skill, jobDescription) {
-  const jobText = jobDescription.toLowerCase();
-  const skillLower = skill.toLowerCase();
-  
-  // Direct mention
-  if (jobText.includes(skillLower)) return true;
-  
-  // Check for related terms
-  const skillRelations = {
-    'javascript': ['js', 'frontend', 'web development', 'react', 'vue', 'angular'],
-    'python': ['data science', 'machine learning', 'backend', 'automation', 'ai'],
-    'sql': ['database', 'data analysis', 'reporting', 'analytics'],
-    'excel': ['data analysis', 'reporting', 'spreadsheet', 'analytics'],
-    'project management': ['coordination', 'planning', 'leadership', 'organization'],
-    // Add more as needed
-  };
-  
-  if (skillRelations[skillLower]) {
-    return skillRelations[skillLower].some(term => jobText.includes(term));
-  }
-  
-  return false;
-}
-
-// Keep existing helper functions
 async function extractResumeContent(resumePath) {
   if (!resumePath || !fs.existsSync(resumePath)) return '';
   const ext = path.extname(resumePath).toLowerCase();
-  return ext === '.pdf'
-    ? await extractPdfText(resumePath)
-    : ext === '.docx' || ext === '.doc'
-    ? await extractDocxText(resumePath)
-    : '';
+  if (ext === '.pdf') return await extractPdfText(resumePath);
+  if (ext === '.docx' || ext === '.doc') return await extractDocxText(resumePath);
+  return '';
 }
 
 async function extractPdfText(resumePath) {
@@ -517,8 +379,11 @@ async function extractPdfText(resumePath) {
     const buffer = fs.readFileSync(resumePath);
     const data = await pdfParse(buffer);
     return data.text;
-  } catch (e) {
-    console.error('PDF parsing error:', e);
+  } catch (error) {
+    console.error('PDF parsing error:', {
+      file: resumePath,
+      error: error.message
+    });
     return '';
   }
 }
@@ -527,8 +392,11 @@ async function extractDocxText(resumePath) {
   try {
     const result = await mammoth.extractRawText({ path: resumePath });
     return result.value;
-  } catch (e) {
-    console.error('DOCX parsing error:', e);
+  } catch (error) {
+    console.error('DOCX parsing error:', {
+      file: resumePath,
+      error: error.message
+    });
     return '';
   }
 }

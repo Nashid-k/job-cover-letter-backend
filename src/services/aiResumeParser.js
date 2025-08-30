@@ -1,452 +1,765 @@
 const axios = require('axios');
 
-// Use a more reliable model that's available on Hugging Face
-const HF_BASE_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-large";
-const HF_TOKEN = process.env.HF_TOKEN;
-
-// Alternative: Use OpenAI API if available (uncomment if you have OpenAI API key)
-// const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-/**
- * Call Hugging Face API using axios with fallback
- */
-async function hfCall(prompt) {
-  try {
-    // Try a smaller, more available model first
-    const response = await axios.post(
-      "https://api-inference.huggingface.co/models/gpt2",
-      { 
-        inputs: prompt,
-        parameters: {
-          max_length: 1000,
-          temperature: 0.3
-        }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${HF_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 15000 // 15 second timeout
-      }
-    );
-
-    const data = response.data;
-
-    if (Array.isArray(data) && data[0]?.generated_text) {
-      return data[0].generated_text;
-    } else if (typeof data === 'string') {
-      return data;
-    }
-    
-    console.warn("⚠️ AI returned unexpected format:", data);
-    return "";
-  } catch (err) {
-    console.error("❌ HF API Error:", err.message);
-    if (err.response) {
-      console.error("❌ Response status:", err.response.status);
-      console.error("❌ Response data:", err.response.data);
-    }
-    return "";
-  }
-}
-
-/**
- * Simple resume extraction without complex AI
- */
-async function simpleResumeExtraction(rawText) {
-  const detectedProfession = detectProfession(rawText);
-  
-  // Extract basic information using regex patterns
-  const emailMatch = rawText.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
-  const nameMatch = rawText.match(/(?:^|\n)[A-Z][a-z]+ [A-Z][a-z]+/);
-  
-  // Extract skills using pattern matching
-  const skills = extractSkillsFromText(rawText, detectedProfession);
-  const normalizedSkills = validateAndNormalizeSkills(skills, rawText);
-  
-  // Extract job title from common patterns
-  const title = extractJobTitle(rawText);
-  
-  // Extract location if available
-  const location = extractLocation(rawText);
-  
-  return {
-    profession: detectedProfession,
-    name: nameMatch ? nameMatch[0].trim() : "",
-    email: emailMatch ? emailMatch[0] : "",
-    jobPreferences: {
-      title: title,
-      location: location,
-      skills: normalizedSkills,
-      remote: false,
-      preferredIndustries: []
-    },
-    projects: [],
-    experience: [],
-    education: [],
-    certifications: []
-  };
-}
-
-/**
- * Extract job title from text
- */
-function extractJobTitle(text) {
-  const titlePatterns = [
-    /(?:^|\n)(?:Senior|Junior|Lead|Principal)?\s*(Software|Frontend|Backend|Full.?Stack|Web|Mobile|DevOps|Data|QA|Test|UX|UI)?\s*(Engineer|Developer|Programmer|Designer|Analyst|Architect|Specialist)/i,
-    /(?:Position|Title|Role)[:\s]*([^\n]+)/i,
-    /(?:^|\n)[A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s*[-–]\s*([^\n]+)/i
-  ];
-  
-  for (const pattern of titlePatterns) {
-    const match = text.match(pattern);
-    if (match && match[1]) {
-      return match[1].trim();
-    }
-  }
-  
-  return "";
-}
-
-/**
- * Extract location from text
- */
-function extractLocation(text) {
-  const locationPatterns = [
-    /(?:Location|Address|Based in)[:\s]*([^\n]+)/i,
-    /(?:^|\n)(?:Remote|On-site|Hybrid|[\w\s]+,?\s*(?:CA|NY|TX|FL|IL|PA|OH|GA|NC|MI|NJ|VA|WA|AZ|MA|IN|TN|MO|MD|WI|MN|CO|AL|SC|LA|KY|OR|OK|CT|IA|MS|AR|UT|NV|NM|WV|NE|ID|HI|ME|NH|RI|MT|DE|SD|AK|ND|VT|WY|DC))[,\s]*/i
-  ];
-  
-  for (const pattern of locationPatterns) {
-    const match = text.match(pattern);
-    if (match && match[1]) {
-      return match[1].trim();
-    }
-  }
-  
-  return "";
-}
-
-/**
- * Profession-aware skill extraction with enhanced prompting
- */
-async function extractResume(rawText) {
-  // If we don't have a valid API key or the model is unavailable, use simple extraction
-  if (!HF_TOKEN) {
-    console.log("⚠️ No HF token available, using simple extraction");
-    return simpleResumeExtraction(rawText);
+class ResumeParser {
+  constructor() {
+    this.initialized = true;
+    this.HF_BASE_URL = 'https://router.huggingface.co/v1';
+    this.HF_TOKEN = process.env.HF_TOKEN;
+    this.MAX_RETRIES = 3;
+    this.RETRY_DELAY = 1000;
   }
 
-  const prompt = `
-Extract information from this resume in JSON format. Focus on:
-- Profession/role
-- Name and email
-- Job title preferences
-- Skills (technical and professional)
-- Location preference
-
-Return ONLY valid JSON with this structure:
-{
-  "profession": "detected profession",
-  "name": "full name",
-  "email": "email address",
-  "jobPreferences": {
-    "title": "job title",
-    "location": "location",
-    "skills": ["skill1", "skill2", "skill3"],
-    "remote": false,
-    "preferredIndustries": []
-  }
-}
-
-Resume Text:
-${rawText.substring(0, 2000)}
-  `;
-
-  try {
-    const output = await hfCall(prompt);
-    
-    if (!output) {
-      console.error("❌ Empty response from AI, using simple extraction");
-      return simpleResumeExtraction(rawText);
-    }
-
-    // Try to find JSON in the response
-    const jsonStart = output.indexOf("{");
-    const jsonEnd = output.lastIndexOf("}");
-    if (jsonStart === -1 || jsonEnd === -1) {
-      console.error("❌ No JSON found in AI response, using simple extraction");
-      return simpleResumeExtraction(rawText);
-    }
-
-    const jsonStr = output.slice(jsonStart, jsonEnd + 1);
-    let parsed = {};
-    
+  async parseResume(rawText) {
     try {
-      parsed = JSON.parse(jsonStr);
-    } catch (err) {
-      console.error("❌ JSON Parse Error:", err.message);
-      return simpleResumeExtraction(rawText);
+      const cleanedText = this.cleanText(rawText);
+      const lines = this.getLines(cleanedText);
+
+      let aiResult = {};
+      let parseMethod = 'rule-based';
+      try {
+        aiResult = await this.parseWithAI(cleanedText);
+        parseMethod = 'AI';
+      } catch (aiError) {
+        console.warn('AI parsing failed, using rule-based fallback:', aiError.message);
+      }
+
+      const result = {
+        name: aiResult.name || this.extractName(cleanedText, lines) || "",
+        email: aiResult.email || this.extractEmail(cleanedText) || "",
+        phone: aiResult.phone || this.extractPhone(cleanedText) || "",
+        profession: aiResult.profession || this.detectProfession(cleanedText, lines) || "Professional",
+        jobPreferences: {
+          title: aiResult.jobPreferences?.title || this.extractJobTitle(cleanedText, lines) || "",
+          location: aiResult.jobPreferences?.location || this.extractLocation(cleanedText) || "",
+          skills: aiResult.jobPreferences?.skills || this.extractSkills(cleanedText) || [],
+          remote: aiResult.jobPreferences?.remote !== undefined ? aiResult.jobPreferences.remote : this.detectRemotePreference(cleanedText),
+          preferredIndustries: aiResult.jobPreferences?.preferredIndustries || this.extractIndustries(cleanedText) || [],
+          salaryExpectations: "",
+        },
+        experience: aiResult.experience || this.extractExperience(cleanedText) || [],
+        education: aiResult.education || this.extractEducation(cleanedText) || [],
+        projects: aiResult.projects || this.extractProjects(cleanedText) || [],
+        certifications: aiResult.certifications || this.extractCertifications(cleanedText) || [],
+      };
+
+      console.log(`Resume parsing completed using ${parseMethod} method`);
+      return this.validateAndClean(result);
+    } catch (error) {
+      console.error('Resume parsing error:', error.message);
+      return this.createMinimalResult();
     }
-    
-    return parsed;
-  } catch (err) {
-    console.error("❌ Error in extractResume:", err.message);
-    return simpleResumeExtraction(rawText);
-  }
-}
-
-/**
- * Normalize and clean skill names
- */
-function normalizeSkillName(skill) {
-  if (typeof skill !== 'string') return '';
-  
-  let normalized = skill.trim()
-    .replace(/^(?:Frontend|Backend|Fullstack|Web|Mobile|Software|Mechanical|Civil|Electrical|Medical|Surgical|HR|Talent|Driving|Teaching|Nursing|Accounting|Financial)\s*(?:Development|Procedures|Practices|Licenses|Methods|Management|Engineering|Care|Reporting|Project|Legal|Patient|Clinical)\s*[:\\-]\s*/i, '')
-    .replace(/^(?:Platforms?|Tools?|Technologies?|Skills?|Frameworks?|Languages?|Procedures?|Certifications?|Licenses?|Methods?|Standards?)\s*[:\\-]\s*/i, '')
-    .replace(/^(?:Proficient in|Expert in|Experience with|Knowledge of|Specialized in|Trained in|Certified in|Licensed in|Skilled in)\s*/i, '')
-    .replace(/^(?:creating|building|developing|managing|implementing|using|working with|performing|operating|designing|recruiting|teaching|diagnosing|analyzing|treating|driving|auditing)\s+/i, '')
-    .replace(/React\.js/i, 'React')
-    .replace(/Node\.js/i, 'Node')
-    .replace(/Express\.js/i, 'Express')
-    .replace(/JavaScript/i, 'JavaScript')
-    .replace(/TypeScript/i, 'TypeScript')
-    .replace(/HTML5?/i, 'HTML')
-    .replace(/CSS3?/i, 'CSS')
-    .replace(/AutoCAD/i, 'AutoCAD')
-    .replace(/MATLAB/i, 'MATLAB')
-    .replace(/SolidWorks/i, 'SolidWorks')
-    .replace(/CPR certification/i, 'CPR')
-    .replace(/Commercial Driver\'s License|CDL Class A|CDL Class B/i, 'CDL')
-    .replace(/Performance Management/i, 'Performance Management')
-    .replace(/Curriculum Development/i, 'Curriculum Development')
-    .replace(/Laparoscopic Surgery/i, 'Laparoscopic Surgery')
-    .replace(/Wound Care/i, 'Wound Care')
-    .replace(/GAAP/i, 'GAAP')
-    .replace(/HIPAA Compliance/i, 'HIPAA')
-    .replace(/Project Management Professional|PMP/i, 'PMP')
-    .replace(/\s*(?:development|framework|library|tool|technology|platform|software|procedure|practice|license|method|certification|system|operation|compliance|standard)\s*$/i, '')
-    .replace(/\s*operations?\s*$/i, '')
-    .replace(/\s*apis?\s*$/i, ' API')
-    .replace(/\s+/g, ' ')
-    .replace(/\s*[:\\-]\s*.*$/, '')
-    .trim();
-
-  if (normalized.length > 0) {
-    normalized = normalized.charAt(0).toUpperCase() + normalized.slice(1);
   }
 
-  return normalized;
+  cleanApiResponse(content) {
+    const jsonMatch = content.match(/{[\s\S]*}/);
+    if (jsonMatch) {
+      return jsonMatch[0];
+    }
+    return content;
+  }
+
+  async parseWithAI(text) {
+    if (!this.HF_TOKEN) {
+      throw new Error("Hugging Face API token is not configured");
+    }
+
+    const systemPrompt = `
+You are an expert resume parser capable of handling resumes from any profession (e.g., doctor, developer, engineer, HR, teacher, etc.). Extract information from the provided resume text and return it as a JSON object with the exact structure below. If a field cannot be extracted, return an empty string, empty array, or false. Do not include extra fields or explanations. Parse dates into MM/YYYY format for startDate and endDate; for year-only (e.g., 2024), assume January start and December end (01/2024, 12/2024). Set current to true only if the duration explicitly mentions "Present". Set location to empty string ("") unless explicitly stated as a city or state in a contact section. Use the resume header for profession and jobPreferences.title if available. Automatically detect and correct any typos or misspellings in the entire text using your language skills (e.g., "Deploma" to "Diploma", "Exprience" to "Experience", "gamil.com" to "gmail.com", "Phyisician" to "Physician", "Engeneer" to "Engineer", etc.). Identify the profession from the header or context without assuming specific roles. Return the result as a valid JSON string, without any additional text or comments.
+
+{
+  "name": string,
+  "email": string,
+  "phone": string,
+  "profession": string,
+  "jobPreferences": {
+    "title": string,
+    "location": string,
+    "skills": [string],
+    "remote": boolean,
+    "preferredIndustries": [string],
+    "salaryExpectations": string
+  },
+  "experience": [
+    {
+      "company": string,
+      "position": string,
+      "description": string,
+      "startDate": string,
+      "endDate": string,
+      "current": boolean,
+      "achievements": [string],
+      "skills": [string]
+    }
+  ],
+  "education": [
+    {
+      "institution": string,
+      "degree": string,
+      "fieldOfStudy": string,
+      "startDate": string,
+      "endDate": string,
+      "current": boolean,
+      "description": string
+    }
+  ],
+  "projects": [
+    {
+      "title": string,
+      "description": string,
+      "technologies": [string],
+      "startDate": string,
+      "endDate": string,
+      "current": boolean,
+      "achievements": [string]
+    }
+  ],
+  "certifications": [
+    {
+      "name": string,
+      "issuer": string,
+      "date": string,
+      "expiryDate": string
+    }
+  ]
 }
 
-/**
- * Enhanced skill validation and normalization
- */
-function validateAndNormalizeSkills(skills, text) {
-  if (!skills || !Array.isArray(skills)) return [];
-  
-  const normalizedSkills = skills.map(skill => normalizeSkillName(skill));
-  
-  const excludePatterns = [
-    /^\d{4}/,
-    /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,
-    /present|current|ongoing|location|address|city|state|country/i,
-    /years?|yrs?|months?|mos?|days?/i,
-    /^[^a-z]+$/i,
-    /\b(and|the|with|using|via|through|for|in|on|at)\b/i,
-    /company|corporation|llc|inc|ltd|enterprise|firm|organization|hospital|clinic|school|university/i,
-    /project|construction|site|plant|facility|manufacturing|production|department|office/i
-  ];
+Resume text:
+{resume_text}
+`;
 
-  return normalizedSkills.filter(skill => {
-    if (!skill || skill.length < 2 || skill.length > 50) return false;
-    
-    const lowerSkill = skill.toLowerCase();
-    
-    if (excludePatterns.some(pattern => pattern.test(lowerSkill))) {
+    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
+      try {
+        const response = await axios.post(
+          `${this.HF_BASE_URL}/chat/completions`,
+          {
+            model: 'meta-llama/Llama-3.1-8B-Instruct:cerebras',
+            messages: [
+              { role: 'system', content: systemPrompt.replace('{resume_text}', text) },
+              { role: 'user', content: 'Parse the resume text into the specified JSON format. Return only the JSON object, with no additional text.' },
+            ],
+            max_tokens: 3000,
+            temperature: 0.1,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${this.HF_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 60000,
+          }
+        );
+
+        let content = response.data.choices?.[0]?.message?.content;
+        if (!content) {
+          throw new Error('No content returned from Hugging Face API');
+        }
+
+        content = this.cleanApiResponse(content);
+
+        try {
+          return JSON.parse(content);
+        } catch (parseError) {
+          console.error(`JSON parsing failed (attempt ${attempt}):`, {
+            error: parseError.message,
+            content: content.substring(0, 200)
+          });
+          if (attempt === this.MAX_RETRIES) {
+            throw parseError;
+          }
+        }
+      } catch (error) {
+        console.error(`Hugging Face API error (attempt ${attempt}):`, {
+          status: error.response?.status,
+          message: error.message
+        });
+        if (attempt === this.MAX_RETRIES) {
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
+      }
+    }
+
+    throw new Error('Failed to parse resume with AI after maximum retries');
+  }
+
+  extractName(text, lines) {
+    if (!text || !lines) return "";
+    const strategies = [
+      () => {
+        if (lines.length > 0 && this.isLikelyName(lines[0])) {
+          return lines[0];
+        }
+        return null;
+      },
+      () => {
+        const patterns = [
+          /(?:Name|Full Name|Contact)[:\s-]+([^\n]{3,50})/i,
+          /(?:^|\n)((?:Dr\.|Mr\.|Ms\.|Mrs\.|Prof\.)?\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?:\s+[A-Z][a-z]+)*\s*(?:\n|$)/
+        ];
+        for (const pattern of patterns) {
+          const match = text.match(pattern);
+          if (match && match[1] && this.isLikelyName(match[1].trim())) {
+            return match[1].trim();
+          }
+        }
+        return null;
+      },
+      () => {
+        const email = this.extractEmail(text);
+        if (email) {
+          const username = email.split('@')[0];
+          const nameFromEmail = username
+            .replace(/[._-]/g, ' ')
+            .split(' ')
+            .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+            .join(' ');
+          if (this.isLikelyName(nameFromEmail)) {
+            return nameFromEmail;
+          }
+        }
+        return null;
+      },
+    ];
+
+    for (const strategy of strategies) {
+      const result = strategy();
+      if (result) return result;
+    }
+
+    return "";
+  }
+
+  isLikelyName(text) {
+    if (!text || text.length < 3 || text.length > 50) return false;
+    const lowerText = text.toLowerCase();
+    const falsePositives = [
+      'resume', 'cv', 'curriculum vitae', 'linkedin', 'github',
+      'portfolio', 'objective', 'summary', 'experience', 'education',
+      'skills', 'contact', 'email', 'phone', 'address', 'full stack'
+    ];
+    if (falsePositives.some(fp => lowerText.includes(fp))) {
       return false;
     }
-
-    if (!/[a-z]/i.test(skill)) return false;
-
-    return true;
-  });
-}
-
-/**
- * Detect profession from text
- */
-function detectProfession(text) {
-  const textLower = text.toLowerCase();
-  const professionPatterns = [
-    { profession: "Software Developer", keywords: /\b(software|developer|programmer|coder|engineer\s*(?:software|web|application|frontend|backend|fullstack))\b/i },
-    { profession: "Physician", keywords: /\b(physician|doctor|md|surgeon|cardiologist|pediatrician|medical\s*practitioner)\b/i },
-    { profession: "Nurse", keywords: /\b(nurse|rn|registered\s*nurse|nurse\s*practitioner|cna)\b/i },
-    { profession: "Mechanical Engineer", keywords: /\b(mechanical\s*engineer|mechanical\s*engineering)\b/i },
-    { profession: "Civil Engineer", keywords: /\b(civil\s*engineer|civil\s*engineering|structural\s*engineer)\b/i },
-    { profession: "Electrical Engineer", keywords: /\b(electrical\s*engineer|electrical\s*engineering)\b/i },
-    { profession: "Truck Driver", keywords: /\b(truck\s*driver|commercial\s*driver|cdl\s*driver|delivery\s*driver)\b/i },
-    { profession: "HR Manager", keywords: /\b(hr|human\s*resources|talent\s*management|recruitment\s*manager|hr\s*manager)\b/i },
-    { profession: "Teacher", keywords: /\b(teacher|educator|professor|instructor|lecturer)\b/i },
-    { profession: "Accountant", keywords: /\b(accountant|cpa|financial\s*analyst|bookkeeper|accounting)\b/i }
-  ];
-
-  for (const { profession, keywords } of professionPatterns) {
-    if (keywords.test(textLower)) {
-      return profession;
-    }
+    const words = text.split(/\s+/);
+    if (words.length < 1 || words.length > 4) return false;
+    return words.every(word => /^[A-Z]/.test(word) || /^[A-Z]+$/.test(word) || /^(Dr\.|Mr\.|Ms\.|Mrs\.|Prof\.)$/.test(word));
   }
-  return "unknown";
-}
 
-/**
- * Extract skills from text using pattern matching (fallback)
- */
-function extractSkillsFromText(text, profession) {
-  const skills = new Set();
-  const textLower = text.toLowerCase();
+  extractEmail(text) {
+    if (!text) return "";
+    const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+    const match = text.match(emailPattern);
+    if (match) {
+      let email = match[0];
+      email = email.replace(/\.com\.com$/, '.com')
+                   .replace(/\.con$/, '.com')
+                   .replace(/@gamil\.com$/, '@gmail.com')
+                   .replace(/@gmial\.com$/, '@gmail.com')
+                   .replace(/@yaho\.com$/, '@yahoo.com')
+                   .replace(/@yahho\.com$/, '@yahoo.com')
+                   .replace(/@hotmil\.com$/, '@hotmail.com')
+                   .replace(/@outlok\.com$/, '@outlook.com');
+      return email;
+    }
+    return "";
+  }
 
-  const professionSkillPatterns = {
-    "Software Developer": [
-      /\b(react|angular|vue|node|express|javascript|typescript|html|css|mongodb|sql|mysql|postgresql|aws|azure|docker|kubernetes|git|github|gitlab|postman|jira|jenkins)\b/gi,
-      /\b(agile|scrum|kanban|devops|ci\/cd|rest|graphql|crud|mvc|oop|tdd|bdd|jest|mocha|cypress)\b/gi
-    ],
-    "Physician": [
-      /\b(laparoscopic\s*surgery|cardiology|pediatrics|emergency\s*medicine|cpr|patient\s*diagnosis|surgical\s*procedures|emr|hipaa)\b/gi,
-      /\b(ekg\s*interpretation|ultrasound|radiology|anesthesia\s*administration)\b/gi
-    ],
-    "Nurse": [
-      /\b(wound\s*care|patient\s*care|iv\s*therapy|cpr|medication\s*administration|vital\s*signs\s*monitoring|emr|hipaa)\b/gi,
-      /\b(patient\s*assessment|catheterization|phlebotomy)\b/gi
-    ],
-    "Mechanical Engineer": [
-      /\b(autocad|solidworks|matlab|cad|finite\s*element\s*analysis|thermodynamics|mechanical\s*design|ansys)\b/gi,
-      /\b(prototyping|material\s*selection|mechanical\s*testing)\b/gi
-    ],
-    "Civil Engineer": [
-      /\b(autocad|civil3d|structural\s*analysis|geotechnical\s*engineering|bridge\s*design|surveying)\b/gi,
-      /\b(construction\s*management|staad\.pro|sap2000)\b/gi
-    ],
-    "Electrical Engineer": [
-      /\b(plc\s*programming|circuit\s*design|matlab|autocad\s*electrical|power\s*systems|embedded\s*systems)\b/gi,
-      /\b(electrical\s*testing|control\s*systems|cad)\b/gi
-    ],
-    "Truck Driver": [
-      /\b(cdl|hazmat|endorsement|defensive\s*driving|vehicle\s*inspection|logistics|route\s*planning)\b/gi,
-      /\b(forklift\s*operation|pallet\s*truck|load\s*securement)\b/gi
-    ],
-    "HR Manager": [
-      /\b(recruitment|talent\s*acquisition|performance\s*management|employee\s*relations|hris|payroll|compliance|onboarding)\b/gi,
-      /\b(labor\s*laws|benefits\s*administration|conflict\s*resolution)\b/gi
-    ],
-    "Teacher": [
-      /\b(curriculum\s*development|classroom\s*management|lesson\s*planning|educational\s*technology|student\s*assessment)\b/gi,
-      /\b(special\s*education|esl\s*teaching|pedagogy)\b/gi
-    ],
-    "Accountant": [
-      /\b(gaap|ifrs|financial\s*reporting|tax\s*preparation|auditing|quickbooks|excel|bookkeeping)\b/gi,
-      /\b(budgeting|cost\s*accounting|financial\s*analysis)\b/gi
-    ],
-    "unknown": [
-      /\b(project\s*management|communication|problem\s*solving|teamwork|leadership|time\s*management)\b/gi
-    ]
-  };
+  extractPhone(text) {
+    if (!text) return "";
+    const phonePatterns = [
+      /\b\+?\d{1,3}[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/,
+      /\b\(\d{3}\)\s*\d{3}[-.]?\d{4}\b/,
+      /\b\d{10,12}\b/
+    ];
+    for (const pattern of phonePatterns) {
+      const match = text.match(pattern);
+      if (match) return match[0];
+    }
+    return "";
+  }
 
-  const generalPatterns = [
-    /(?:worked\s*with|utilized|used|implemented|developed|created|built|managed|performed|operated|designed|recruited|taught|diagnosed|analyzed|treated|drove|audited)\s+([^.,;]+)/gi,
-    /(?:skills?|technologies?|tools?|proficient\s*in|expertise\s*in|specialized\s*in|experienced\s*in|knowledge\s*of|familiar\s*with|certified\s*in|licensed\s*in|trained\s*in)[:\s]*([^.•\n]+)/gi
-  ];
-
-  const patterns = [...(professionSkillPatterns[profession] || professionSkillPatterns["unknown"]), ...generalPatterns];
-
-  patterns.forEach(pattern => {
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      if (match[1] || match[0]) {
-        const skillText = match[1] || match[0];
-        skillText.split(/[,&\/]/).forEach(part => {
-          const skill = normalizeSkillName(part.trim());
-          if (skill && skill.length > 2) {
-            skills.add(skill);
+  detectProfession(text, lines) {
+    if (!text || !lines) return "Professional";
+    const headerPatterns = [
+      /(?:^|\n)((?:Dr\.|Mr\.|Ms\.|Mrs\.|Prof\.)?\s*[A-Z][a-zA-Z\s]*(?:Developer|Engineer|Physician|Doctor|Manager|Analyst|Scientist|Consultant|Specialist|Coordinator|Administrator|Teacher|Professor))/i
+    ];
+    for (const pattern of headerPatterns) {
+      for (const line of lines.slice(0, 5)) {
+        const match = line.match(pattern);
+        if (match && match[0].length > 5 && !this.isLikelyName(line)) {
+          return match[0].trim();
+        }
+      }
+    }
+    const patterns = [
+      /(?:Experience|Summary|Objective)[:\s]*(.*?)(?:\n|$)/is
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        const words = match[1].split(/\s+/);
+        for (const word of words) {
+          if (/^(Developer|Engineer|Physician|Doctor|Manager|Analyst|Scientist|Consultant|Specialist|Coordinator|Administrator|Teacher|Professor)$/i.test(word)) {
+            return word;
           }
-        });
+        }
       }
     }
-  });
+    return "Professional";
+  }
 
-  return Array.from(skills);
-}
-
-/**
- * Main parsing function with enhanced skill processing
- */
-async function parseResume(rawText) {
-  try {
-    console.log("📄 Starting resume parsing...");
-    
-    // Detect profession first
-    const detectedProfession = detectProfession(rawText);
-    console.log(`🔍 Detected Profession: ${detectedProfession}`);
-    
-    let parsedData = await extractResume(rawText);
-    parsedData.profession = detectedProfession;
-    
-    // Normalize and validate skills
-    if (parsedData.jobPreferences?.skills) {
-      parsedData.jobPreferences.skills = validateAndNormalizeSkills(
-        parsedData.jobPreferences.skills,
-        rawText
-      );
-    }
-
-    // Fallback to text extraction if needed
-    if (!parsedData.jobPreferences?.skills || parsedData.jobPreferences.skills.length < 3) {
-      console.log("🔄 Using enhanced text-based skill extraction");
-      const textSkills = extractSkillsFromText(rawText, detectedProfession);
-      const normalizedTextSkills = validateAndNormalizeSkills(textSkills, rawText);
-      
-      if (!parsedData.jobPreferences) {
-        parsedData.jobPreferences = { skills: normalizedTextSkills };
-      } else {
-        const mergedSkills = [...new Set([
-          ...(parsedData.jobPreferences.skills || []),
-          ...normalizedTextSkills
-        ])];
-        parsedData.jobPreferences.skills = mergedSkills;
+  extractJobTitle(text, lines) {
+    if (!text || !lines) return "";
+    const headerPatterns = [
+      /(?:^|\n)((?:Dr\.|Mr\.|Ms\.|Mrs\.|Prof\.)?\s*[A-Z][a-zA-Z\s]*(?:Developer|Engineer|Physician|Doctor|Manager|Analyst|Scientist|Consultant|Specialist|Coordinator|Administrator|Teacher|Professor))/i
+    ];
+    for (const pattern of headerPatterns) {
+      for (const line of lines.slice(0, 5)) {
+        const match = line.match(pattern);
+        if (match && match[0].length > 5 && !this.isLikelyName(line)) {
+          return match[0].trim();
+        }
       }
     }
-
-    // Final processing
-    if (parsedData.jobPreferences.skills) {
-      parsedData.jobPreferences.skills = [
-        ...new Set(
-          parsedData.jobPreferences.skills
-            .filter(skill => skill && skill.length > 1 && skill.length < 50)
-            .map(skill => skill.trim())
-        )
-      ].sort();
+    const patterns = [
+      /(?:Current|Present).*?(?:Position|Role|Title)[:\s]*([^\n]{5,80})/i,
+      /(?:^|\n)((?:Senior|Junior|Lead|Principal)?\s*[A-Za-z\s]*(?:Developer|Engineer|Physician|Doctor|Manager|Analyst|Scientist|Consultant|Specialist|Coordinator|Administrator|Teacher|Professor))/i
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
     }
+    return "";
+  }
 
-    console.log(`✅ Resume parsed with ${parsedData.jobPreferences.skills.length} clean skills for ${detectedProfession}`);
-    return parsedData;
-  } catch (err) {
-    console.error("❌ parseResume error:", err.message);
-    const detectedProfession = detectProfession(rawText);
-    const fallbackSkills = validateAndNormalizeSkills(extractSkillsFromText(rawText, detectedProfession), rawText);
-    return { 
-      profession: detectedProfession, 
-      jobPreferences: { 
-        skills: fallbackSkills,
-        title: "",
-        location: "",
-        remote: false,
-        preferredIndustries: []
-      } 
+  extractLocation(text) {
+    if (!text) return "";
+    const patterns = [
+      /(?:Location|Address|Based\s*in|Located\s*in)[:\s]*([^\n,]{3,50})/i,
+      /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]*)*)[,\s]*(?:CA|NY|TX|FL|IL|PA|OH|GA|NC|MI|NJ|VA|WA|AZ|MA|IN|TN|MO|MD|WI|MN|CO|AL|SC|LA|KY|OR|OK|CT|IA|MS|AR|UT|NV|NM|WV|NE|ID|HI|ME|NH|RI|MT|DE|SD|AK|ND|VT|WY|India)\b/i
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        const location = match[1].trim();
+        if (location.length > 2 && location.length < 50 && !/based filtering/i.test(location) && !this.isLikelyName(location)) {
+          return location;
+        }
+      }
+    }
+    return "";
+  }
+
+  extractSkills(text) {
+    if (!text) return [];
+    const skills = new Set();
+    const skillSections = [
+      'Skills', 'Technical Skills', 'Technologies', 'Expertise',
+      'Programming Languages', 'Frameworks', 'Tools', 'Databases',
+      'Competencies', 'Proficiencies', 'Abilities'
+    ].map(section => this.correctSectionTypo(section));
+    skillSections.forEach(section => {
+      const sectionContent = this.extractSection(text, section);
+      if (sectionContent) {
+        this.extractSkillsFromSection(sectionContent).forEach(skill => skills.add(skill));
+      }
+    });
+    const experience = this.extractSection(text, 'Experience|Work Experience|Employment');
+    if (experience) {
+      this.extractSkillsFromText(experience).forEach(skill => skills.add(skill));
+    }
+    const projects = this.extractSection(text, 'Projects|Personal Projects');
+    if (projects) {
+      this.extractSkillsFromText(projects).forEach(skill => skills.add(skill));
+    }
+    return Array.from(skills).filter(skill => this.isValidSkill(skill));
+  }
+
+  extractSkillsFromSection(sectionText) {
+    const skills = [];
+    const patterns = [
+      /[•\-]\s*([^\n]{3,50})/g,
+      /,\s*([^\n,]{3,50})/g,
+      /\n\s*([^\n]{3,50})/g
+    ];
+
+    patterns.forEach(pattern => {
+      let match;
+      while ((match = pattern.exec(sectionText)) !== null) {
+        if (match[1]) {
+          const skill = match[1].trim();
+          if (this.isValidSkill(skill)) {
+            skills.push(skill);
+          }
+        }
+      }
+    });
+
+    return skills;
+  }
+
+  extractSkillsFromText(text) {
+    if (!text) return [];
+    const keywords = [
+      'JavaScript', 'TypeScript', 'Python', 'Java', 'C#', 'C++', 'PHP', 'Ruby',
+      'React', 'Angular', 'Vue', 'Node.js', 'Express', 'Django', 'Flask', 'Spring',
+      'FastAPI', 'Next.js', 'Electron.js', 'MUI', 'Redux', 'Tailwind CSS', 'Bootstrap',
+      'MySQL', 'PostgreSQL', 'MongoDB', 'Redis', 'SQLite', 'DynamoDB',
+      'AWS', 'Azure', 'Firebase', 'Cloudinary', 'Docker', 'Kubernetes', 'Git', 'GitHub',
+      'GitLab', 'Jenkins', 'Jira', 'Webdriver.io', 'Mocha Chai', 'GitHub Actions', 'Nginx',
+      'Web Audio API', 'JWT Authentication', 'OAuth 2.0', 'Mongoose ODM', 'VS Code',
+      'Postman', 'npm', 'Linux', 'Chrome DevTools', 'Ejs', 'CloudWatch', 'QuickBlox',
+      'Patient Care', 'Surgery', 'Diagnosis', 'Recruitment', 'Employee Relations', 'Payroll',
+      'Teaching', 'Curriculum Development', 'Project Management', 'Financial Analysis',
+      'Data Analysis', 'Machine Learning', 'AI', 'Blockchain', 'Cybersecurity', 'DevOps',
+      'Clinical Research', 'Nursing', 'Therapy', 'Counseling', 'Sales', 'Marketing',
+      'SEO', 'Content Creation', 'Graphic Design', 'UI/UX Design', 'Leadership',
+      'Team Management', 'Strategic Planning', 'Budgeting', 'Legal Advice', 'Contract Negotiation'
+    ];
+    return keywords.filter(keyword => 
+      new RegExp(`\\b${keyword}\\b`, 'i').test(text)
+    );
+  }
+
+  isValidSkill(skill) {
+    if (!skill || typeof skill !== 'string') return false;
+    const cleanSkill = skill.trim();
+    if (cleanSkill.length < 2 || cleanSkill.length > 50) return false;
+    const exclude = [
+      /^\d+$/, /^(and|or|with|using|the|a|an|in|on|at|for|of|to|from)$/i,
+      /^(years?|months?|experience|work|job|position|role)$/i,
+      /(university|college|school|institute)$/i,
+      /(company|corporation|llc|inc)$/i
+    ];
+    return !exclude.some(pattern => pattern.test(cleanSkill)) && /[a-zA-Z]/.test(cleanSkill);
+  }
+
+  extractExperience(text) {
+    if (!text) return [];
+    const experiences = [];
+    const expSection = this.extractSection(text, 'Experience|Work Experience|Employment|Professional Experience');
+    if (expSection) {
+      const entries = expSection.split(/\n(?=\s*(?:[A-Z]|\d))/).filter(entry => entry.trim());
+      entries.forEach(entry => {
+        const experience = this.parseExperienceEntry(entry);
+        if (experience) {
+          experiences.push(experience);
+        }
+      });
+    }
+    return experiences;
+  }
+
+  parseExperienceEntry(entry) {
+    if (!entry) return null;
+    const lines = entry.split('\n').filter(line => line.trim());
+    if (lines.length === 0) return null;
+    const firstLine = lines[0];
+    const companyPositionMatch = firstLine.match(/(.+?)\s*[\|-]\s*(.+?)(?:\s*[\|-]\s*(.+))?$/);
+    if (!companyPositionMatch) return null;
+    const duration = companyPositionMatch[3] || "";
+    const { startDate, endDate } = this.parseDate(duration);
+    return {
+      company: companyPositionMatch[1]?.trim() || "",
+      position: companyPositionMatch[2]?.trim() || "",
+      description: lines.length > 1 ? lines.slice(1).join(' ') : "",
+      startDate,
+      endDate,
+      current: this.isCurrent(duration),
+      achievements: lines.length > 1 ? this.extractAchievements(lines.slice(1).join(' ')) : [],
+      skills: this.extractSkillsFromText(lines.slice(1).join(' ')),
     };
   }
+
+  extractEducation(text) {
+    if (!text) return [];
+    const education = [];
+    const eduSection = this.extractSection(text, 'Education|Eduacation|Deploma|Diploma');
+    if (eduSection) {
+      const entries = eduSection.split(/\n(?=\s*(?:[A-Z]|\d))/);
+      entries.forEach(entry => {
+        const lines = entry.split('\n').filter(line => line.trim());
+        if (lines.length > 0) {
+          const firstLine = lines[0];
+          const parts = firstLine.split(/[-|]/).map(part => part?.trim() || "");
+          const durationLine = lines.find(line => line.match(/\d{4}/) || line.match(/Present|present/i)) || "";
+          const { startDate, endDate } = this.parseDate(durationLine);
+          education.push({
+            institution: parts[0] || "",
+            degree: parts.length > 1 ? parts[1] : "",
+            fieldOfStudy: parts.length > 2 ? parts[2] : "",
+            startDate,
+            endDate,
+            current: this.isCurrent(durationLine),
+            description: lines.length > 2 ? lines.slice(2).join(' ') : "",
+          });
+        }
+      });
+    }
+    return education;
+  }
+
+  extractProjects(text) {
+    if (!text) return [];
+    const projects = [];
+    const projectSection = this.extractSection(text, 'Projects|Personal Projects|Key Projects');
+    if (projectSection) {
+      const entries = projectSection.split(/\n(?=\s*(?:[A-Z]|\d))/);
+      entries.forEach(entry => {
+        const lines = entry.split('\n').filter(line => line.trim());
+        if (lines.length > 0) {
+          const durationLine = lines.find(line => line.match(/\d{4}/) || line.match(/Present|present/i)) || "";
+          const { startDate, endDate } = this.parseDate(durationLine);
+          projects.push({
+            title: lines[0]?.trim() || "",
+            description: lines.length > 1 ? lines.slice(1).join(' ') : "",
+            technologies: this.extractSkillsFromText(lines.join(' ')),
+            startDate,
+            endDate,
+            current: this.isCurrent(durationLine),
+            achievements: lines.length > 1 ? this.extractAchievements(lines.slice(1).join(' ')) : [],
+          });
+        }
+      });
+    }
+    return projects;
+  }
+
+  extractCertifications(text) {
+    if (!text) return [];
+    const certifications = [];
+    const certSection = this.extractSection(text, 'Certifications|Certificates|Key Achievements|Accomplishments');
+    if (certSection) {
+      const entries = certSection.split('\n').filter(line => line.trim());
+      entries.forEach(entry => {
+        const parts = entry.split(/[-|]/).map(part => part?.trim() || "");
+        const date = parts.find(part => part.match(/\d{4}/) || part.match(/(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*\d{4}/i)) || "";
+        certifications.push({
+          name: parts[0] || "",
+          issuer: parts.length > 1 ? parts[1] : "",
+          date: this.normalizeDate(date),
+          expiryDate: "",
+        });
+      });
+    }
+    return certifications;
+  }
+
+  extractIndustries(text) {
+    if (!text) return ['General'];
+    const industries = [];
+    const industryPatterns = {
+      'Technology': /tech|software|it|computer|programming|developer/i,
+      'Healthcare': /healthcare|medical|hospital|pharmaceutical|health|physician|doctor|patient/i,
+      'Education': /education|university|school|teaching|academic|professor|teacher/i,
+      'Finance': /finance|banking|investment|accounting|financial/i,
+      'Human Resources': /hr|human resources|recruitment|employee relations|payroll/i,
+      'Engineering': /engineer|engineering|mechanical|electrical|civil|chemical/i,
+      'Management': /manager|management|director|lead|head of|supervisor/i,
+      'Marketing': /marketing|advertising|branding|SEO|content creation/i,
+      'Sales': /sales|business development|customer service|retail/i,
+      'Legal': /legal|law|attorney|compliance|contract/i,
+      'Design': /design|graphic|UI|UX|creative/i,
+      'Manufacturing': /manufacturing|production|supply chain|logistics/i,
+      'Research': /research|science|data analysis|lab/i
+    };
+    for (const [industry, pattern] of Object.entries(industryPatterns)) {
+      if (pattern.test(text)) {
+        industries.push(industry);
+      }
+    }
+    return industries.length > 0 ? industries : ['General'];
+  }
+
+  detectRemotePreference(text) {
+    if (!text) return false;
+    return /remote|work\s*from\s*home|distributed|location\s*independent/i.test(text);
+  }
+
+  cleanText(text) {
+    if (!text) return "";
+    return text
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  getLines(text) {
+    if (!text) return [];
+    return text.split('\n')
+      .map(line => line?.trim() || "")
+      .filter(line => line.length > 0);
+  }
+
+  extractSection(text, sectionName) {
+    if (!text) return "";
+    const correctedSection = this.correctSectionTypo(sectionName);
+    const pattern = new RegExp(`${correctedSection}[:\s]*(.*?)(?=\\n\\s*[A-Z][A-Za-z]|$)`, 'is');
+    const match = text.match(pattern);
+    return match ? match[1].trim() : '';
+  }
+
+  correctSectionTypo(sectionName) {
+    const typoMap = {
+      'eduacation': 'Education',
+      'deploma': 'Education',
+      'diploma': 'Education',
+      'exprience': 'Experience',
+      'experiance': 'Experience',
+      'work exprience': 'Work Experience',
+      'certifcates': 'Certifications',
+      'certficates': 'Certifications',
+      'achievments': 'Achievements',
+      'acheivements': 'Achievements',
+      'projcts': 'Projects',
+      'parsonal projects': 'Personal Projects',
+      'profesional experience': 'Professional Experience',
+      'employmant': 'Employment',
+      'skils': 'Skills',
+      'techncal skills': 'Technical Skills'
+    };
+    return typoMap[sectionName.toLowerCase()] || sectionName;
+  }
+
+  parseDate(duration) {
+    if (!duration) return { startDate: "", endDate: "" };
+    const dateRegex = /(\w+\s*\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*\d{4})\s*[-–—]\s*(\w+\s*\d{4}|Present|present)/i;
+    const yearOnlyRegex = /(\d{4})\s*[-–—]\s*(\d{4}|Present|present)/i;
+    const singleYearRegex = /^(\d{4})$/i;
+    const shortRangeRegex = /(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*[-–—]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})/i;
+    let match = duration.match(dateRegex);
+    if (match) {
+      return {
+        startDate: this.normalizeDate(match[1].trim()),
+        endDate: match[2].trim().toLowerCase() === 'present' ? 'Present' : this.normalizeDate(match[2].trim()),
+      };
+    }
+    match = duration.match(yearOnlyRegex);
+    if (match) {
+      return {
+        startDate: `01/${match[1].trim()}`,
+        endDate: match[2].trim().toLowerCase() === 'present' ? 'Present' : `12/${match[2].trim()}`,
+      };
+    }
+    match = duration.match(singleYearRegex);
+    if (match) {
+      return {
+        startDate: `01/${match[1].trim()}`,
+        endDate: `12/${match[1].trim()}`,
+      };
+    }
+    match = duration.match(shortRangeRegex);
+    if (match) {
+      return {
+        startDate: `01/${match[1].trim()}`,
+        endDate: `12/${match[1].trim()}`,
+      };
+    }
+    return { startDate: "", endDate: "" };
+  }
+
+  normalizeDate(dateStr) {
+    if (!dateStr || dateStr.toLowerCase() === 'present') return "";
+    const months = {
+      'jan': '01', 'january': '01', 'feb': '02', 'february': '02',
+      'mar': '03', 'march': '03', 'apr': '04', 'april': '04',
+      'may': '05', 'jun': '06', 'june': '06', 'jul': '07', 'july': '07',
+      'aug': '08', 'august': '08', 'sep': '09', 'sept': '09', 'september': '09',
+      'oct': '10', 'october': '10', 'nov': '11', 'november': '11',
+      'dec': '12', 'december': '12'
+    };
+    const parts = dateStr.split(/\s+/);
+    if (parts.length === 2 && months[parts[0].toLowerCase()] && /^\d{4}$/.test(parts[1])) {
+      return `${months[parts[0].toLowerCase()]}/${parts[1]}`;
+    }
+    if (/^\d{4}$/.test(dateStr)) {
+      return `01/${dateStr}`;
+    }
+    return "";
+  }
+
+  isCurrent(duration) {
+    if (!duration) return false;
+    return /Present|present/i.test(duration);
+  }
+
+  extractAchievements(description) {
+    if (!description) return [];
+    return description
+      .split(/[.;]/)
+      .map(s => s?.trim() || "")
+      .filter(s => s.length > 10 && /[a-zA-Z]/.test(s));
+  }
+
+  validateAndClean(result) {
+    return {
+      name: typeof result.name === 'string' && result.name.trim() && result.name.length < 100 ? result.name.trim() : "",
+      email: typeof result.email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result.email.trim()) ? result.email.trim() : "",
+      phone: typeof result.phone === 'string' ? result.phone.trim() : "",
+      profession: typeof result.profession === 'string' && result.profession.trim() ? result.profession.trim() : "Professional",
+      jobPreferences: {
+        title: typeof result.jobPreferences?.title === 'string' && result.jobPreferences.title.trim() && result.jobPreferences.title.length < 100 ? result.jobPreferences.title.trim() : "",
+        location: typeof result.jobPreferences?.location === 'string' && result.jobPreferences.location.trim() && result.jobPreferences.location.length < 100 ? result.jobPreferences.location.trim() : "",
+        skills: Array.isArray(result.jobPreferences?.skills)
+          ? [...new Set(result.jobPreferences.skills.filter(skill => typeof skill === 'string' && skill.trim().length > 2 && skill.trim().length < 50))]
+          : [],
+        remote: typeof result.jobPreferences?.remote === 'boolean' ? result.jobPreferences.remote : false,
+        preferredIndustries: Array.isArray(result.jobPreferences?.preferredIndustries)
+          ? result.jobPreferences.preferredIndustries.filter(ind => typeof ind === 'string' && ind.trim())
+          : [],
+        salaryExpectations: "",
+      },
+      experience: Array.isArray(result.experience)
+        ? result.experience.map(exp => ({
+            company: typeof exp.company === 'string' ? exp.company.trim() : "",
+            position: typeof exp.position === 'string' ? exp.position.trim() : "",
+            description: typeof exp.description === 'string' ? exp.description.trim() : "",
+            startDate: typeof exp.startDate === 'string' ? exp.startDate.trim() : "",
+            endDate: typeof exp.endDate === 'string' ? exp.endDate.trim() : "",
+            current: typeof exp.current === 'boolean' ? exp.current : false,
+            achievements: Array.isArray(exp.achievements) ? exp.achievements.filter(a => typeof a === 'string' && a.trim()) : [],
+            skills: Array.isArray(exp.skills) ? exp.skills.filter(s => typeof s === 'string' && s.trim()) : [],
+          }))
+        : [],
+      education: Array.isArray(result.education)
+        ? result.education.map(edu => ({
+            institution: typeof edu.institution === 'string' ? edu.institution.trim() : "",
+            degree: typeof edu.degree === 'string' ? edu.degree.trim() : "",
+            fieldOfStudy: typeof edu.fieldOfStudy === 'string' ? edu.fieldOfStudy.trim() : "",
+            startDate: typeof edu.startDate === 'string' ? edu.startDate.trim() : "",
+            endDate: typeof edu.endDate === 'string' ? edu.endDate.trim() : "",
+            current: typeof edu.current === 'boolean' ? edu.current : false,
+            description: typeof edu.description === 'string' ? edu.description.trim() : "",
+          }))
+        : [],
+      projects: Array.isArray(result.projects)
+        ? result.projects.map(proj => ({
+            title: typeof proj.title === 'string' ? proj.title.trim() : "",
+            description: typeof proj.description === 'string' ? proj.description.trim() : "",
+            technologies: Array.isArray(proj.technologies) ? proj.technologies.filter(t => typeof t === 'string' && t.trim()) : [],
+            startDate: typeof proj.startDate === 'string' ? proj.startDate.trim() : "",
+            endDate: typeof proj.endDate === 'string' ? proj.endDate.trim() : "",
+            current: typeof proj.current === 'boolean' ? proj.current : false,
+            achievements: Array.isArray(proj.achievements) ? proj.achievements.filter(a => typeof a === 'string' && a.trim()) : [],
+          }))
+        : [],
+      certifications: Array.isArray(result.certifications)
+        ? result.certifications.map(cert => ({
+            name: typeof cert.name === 'string' ? cert.name.trim() : "",
+            issuer: typeof cert.issuer === 'string' ? cert.issuer.trim() : "",
+            date: typeof cert.date === 'string' ? cert.date.trim() : "",
+            expiryDate: typeof cert.expiryDate === 'string' ? cert.expiryDate.trim() : "",
+          }))
+        : [],
+    };
+  }
+
+  createMinimalResult() {
+    return this.validateAndClean({});
+  }
 }
 
-// Export both functions as named exports
-module.exports = { parseResume, hfCall };
+module.exports = { parseResume: (rawText) => new ResumeParser().parseResume(rawText) };

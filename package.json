@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "nodemon server.js"
   },
   "keywords": [],
   "author": "",
@@ -18,13 +19,17 @@
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "express-rate-limit": "^8.0.1",
+    "fuzzball": "^2.2.3",
     "joi": "^18.0.1",
     "jsonwebtoken": "^9.0.2",
     "mammoth": "^1.10.0",
     "mongoose": "^8.18.0",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
+    "nodemon": "^3.1.10",
     "openai": "^5.16.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "uuid": "^11.1.0",
+    "validator": "^13.15.15"
   }
 }
