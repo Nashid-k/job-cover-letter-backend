@@ -1,18 +1,28 @@
+// In your profile route file
 const express = require('express');
 const profileRouter = express.Router();
 const profileController = require('../controllers/profileController');
 const auth = require('../middleware/auth');
-
-// Multer for file uploading
 const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 
-// Configure storage
+
+const uploadDir = 'uploads/resumes/';
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        cb(null, 'uploads/resumes/') // Make sure this directory exists
+
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
     },
     filename: function (req, file, cb) {
-        // Create unique filename: timestamp + original name
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         cb(null, uniqueSuffix + '-' + file.originalname);
     }
@@ -20,14 +30,12 @@ const storage = multer.diskStorage({
 
 const upload = multer({
     storage: storage,
-    // 2MB max file size
-    limits: { fileSize: 2 * 1024 * 1024 },
+    limits: { fileSize: 5 * 1024 * 1024 }, 
     fileFilter: (req, file, cb) => {
-        // Fixed the logic error in file type checking
         const allowedTypes = [
             'application/pdf',
-            'application/msword', // .doc
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' // .docx
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         ];
         
         if (allowedTypes.includes(file.mimetype)) {
@@ -38,8 +46,32 @@ const upload = multer({
     }
 });
 
+
+profileRouter.post('/resume', auth, (req, res, next) => {
+    upload.single('resume')(req, res, function(err) {
+        if (err) {
+            if (err instanceof multer.MulterError) {
+                if (err.code === 'LIMIT_FILE_SIZE') {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'File size too large. Maximum size is 5MB.'
+                    });
+                }
+                return res.status(400).json({
+                    success: false,
+                    message: `Upload error: ${err.message}`
+                });
+            }
+            return res.status(400).json({
+                success: false,
+                message: err.message
+            });
+        }
+        next();
+    });
+}, profileController.uploadResume);
+
 profileRouter.get('/', auth, profileController.getProfile);
 profileRouter.put('/preferences', auth, profileController.updatePreferences);
-profileRouter.post('/resume', auth, upload.single('resume'), profileController.uploadResume);
 
 module.exports = profileRouter;
